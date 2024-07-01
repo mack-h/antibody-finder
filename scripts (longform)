@@ -1,0 +1,552 @@
+!apt-get update # Standard procedure
+#!apt-get install -y chromium-chromedriver # Connects Selenium to Google Chrome browser
+#!apt-get install -y xvfb # Dependency for virtual display (necessary for Colab environment)
+!pip install selenium # Python webscraping package used here (alternative: beautifulsoup)
+!pip install biopython # called as Bio in webscraping block, accesses Entrez protein database
+
+# Install virtual display (for Colab, as there is no built-in display)
+# !pip install pyvirtualdisplay
+
+# Import global libraries
+
+%pip install -q google-colab-selenium
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import os
+import re
+from Bio import Entrez
+from google.colab import files
+import io
+import time
+import requests
+
+# Initialize Selenium driver
+import google_colab_selenium as gs
+driver = gs.Chrome()
+
+# Test driver
+driver.get('https://www.google.com')
+print(driver.title)
+driver.quit()
+
+# Make testing directory / load fixtures
+mkdir test
+cd content/test/
+mkdir test_data
+
+# Preloaded sequence / species specifications (see TEMPLATE in repository) 
+test_filepath = 'test/test_data/selenium blast template 2.txt'
+
+# Load and process template to extract/transform sequences & species IDs for NCBI BLAST
+# Test: neuromedin B
+
+import requests
+
+def download_file(url, local_filename):
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        with open(local_filename, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+    return local_filename
+
+def get_taxon_id(species_name):
+    # Use Entrez ESearch to search for the taxon ID
+    search_handle = Entrez.esearch(db="taxonomy", term=species_name)
+    search_results = Entrez.read(search_handle)
+    search_handle.close()
+    if search_results["IdList"]:
+        return search_results["IdList"][0]
+    else:
+        return None
+
+def read_and_parse_file():
+    # Upload the file
+    uploaded = files.upload()
+    filename = list(uploaded.keys())[0]
+
+    # Read the file
+    with open(filename, 'r') as file:
+        content = file.read()
+
+    # Remove text between triple backticks (```)
+    content = re.sub(r'```.*?```', '', content, flags=re.DOTALL)
+
+    # Parse the file
+    sections = content.split("SPECIES:")
+    sequences_section = sections[0].split("SEQUENCES:")[1].strip()
+    species_section = sections[1].strip()
+
+    # Extract sequences and their ranges, ignoring numbering
+    sequences = []
+    for line in sequences_section.split("\n"):
+        print(f'Parsed line: {line}')
+        line = re.sub(r'^\d+\.\s*', '', line)  # Remove numbering
+        if line.strip():  # Check if the line is not empty
+            match = re.match(r'(.+?)\s*\[(\d+)-(\d+)\]', line)
+            if match:
+                protein = match.group(1).strip()
+                start = int(match.group(2))
+                end = int(match.group(3))
+                sequences.append({"protein": protein, "start": start, "end": end})
+            else:
+                sequences.append({"protein": line.strip(), "start": None, "end": None})
+
+    # Debugging: Print the sequences list
+    print(f"Sequences extracted: {sequences}")
+
+    # Extract species, ignoring numbering and setting to None if no valid species
+    species = re.split(r',|\n', species_section)
+    species = [re.sub(r'^\d+\.\s*', '', s.strip()) for s in species if s.strip()]
+
+    # Filter out empty species entries and get taxon IDs
+    taxon_ids = [get_taxon_id(s) for s in species]
+    taxon_ids = [t for t in taxon_ids if t is not None]
+
+    # Set species to None if the list is empty
+    if not taxon_ids:
+        taxon_ids = None
+
+    # Print received taxon IDs
+    if taxon_ids is None:
+        print('No valid species provided.')
+    else:
+        for taxon_id in taxon_ids:
+            print(f'Received taxon ID: {taxon_id}')
+
+    return sequences, taxon_ids
+
+    from Bio import Entrez, SeqIO
+import re
+import io
+
+# Configure Entrez email (replace with your own email)
+Entrez.email = "your_email@example.com"
+
+# Function to look up protein ID and fetch FASTA sequence with debugging and detailed results handling
+def get_protein_id(protein, species):
+    if not protein or not species:
+        return None
+
+    search_term = f"{protein} AND {species}[Organism]"
+    print(f"Searching for protein: {protein} in species: {species}")
+
+    # Perform the search in the Entrez protein database
+    search_handle = Entrez.esearch(db="protein", term=search_term)
+    search_results = Entrez.read(search_handle)
+    search_handle.close()
+
+    print(f"Search results: {search_results}")
+
+    # Check if any IDs were found
+    if search_results["IdList"]:
+        protein_id = search_results["IdList"][0]
+
+        # Fetch detailed information about the first result to get the accession number and FASTA sequence
+        fetch_handle = Entrez.efetch(db="protein", id=protein_id, rettype="fasta", retmode="text")
+        fetch_results = fetch_handle.read()
+        fetch_handle.close()
+
+        print(f"Fetch results: {fetch_results}")
+
+        # Extract the accession number and FASTA sequence
+        fasta_io = io.StringIO(fetch_results)
+        fasta_record = SeqIO.read(fasta_io, "fasta")
+        accession = fasta_record.id
+        fasta_sequence = str(fasta_record.seq)
+
+        return {
+            "protein_id": accession,
+            "fasta": fetch_results,
+            "fasta_sequence": fasta_sequence
+        }
+
+        print(f'Accession: {accession}')
+        print(f'FASTA Sequence: {fasta_sequence}')
+
+    else:
+        return None
+
+# Function to determine if the input is a peptide sequence
+def is_peptide_sequence(sequence):
+    valid_amino_acids = set("ARNDCEQGHILKMFPSTWYV")
+    return len(sequence) > 5 and all(char in valid_amino_acids for char in sequence) and sequence.isalpha()
+
+# Process sequences
+def process_sequences(sequences, species_of_interest):
+    print('Sequences to analyze:')
+    for seq in sequences:
+        protein = seq["protein"]
+        print(f"Processing sequence: {protein}")
+        if protein and is_peptide_sequence(protein):  # If it is a peptide sequence
+            seq["protein_id"] = protein
+            seq["fasta"] = f">{protein}\n{protein}"
+            seq["fasta_sequence"] = protein
+            print(f'Using raw sequence as query, Range {seq["start"]}-{seq["end"]}')
+        else:
+            protein_info = get_protein_id(protein, species_of_interest)
+            if protein_info:
+                seq["protein_id"] = protein_info["protein_id"]
+                seq["fasta"] = protein_info["fasta"]
+                seq["fasta_sequence"] = protein_info["fasta_sequence"]
+                print(f'{protein} reconfigured to {seq["protein_id"]} based on Entrez results')
+            else:
+                seq["protein_id"] = protein
+                seq["fasta"] = None
+                seq["fasta_sequence"] = None
+
+# Test the function with "NMB"
+# protein_name = "NMB"
+# protein_id = get_protein_id(protein_name)
+# print(f"Protein ID for {protein_name}: {protein_id}")
+
+# Function to format BLAST input
+def format_blast_input(sequences):
+    blast_input = ""
+    for seq in sequences:
+        fasta = seq.get("fasta")
+        if fasta:
+            blast_input += f"{fasta}\n"
+        else:
+            blast_input += f">{seq['protein_id']}\n"
+    return blast_input
+
+#blast_input = format_blast_input(sequences)
+#print("Formatted BLAST Input:")
+#print(blast_input)
+
+# Run BLAST & download the results
+
+import requests
+
+def download_file(url, local_filename):
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        with open(local_filename, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+    return local_filename
+
+def upload_and_download_blast(blast_input, sequences, species, download_dir='/content'):
+    # Create download directory if it doesn't exist
+    os.makedirs(download_dir, exist_ok=True)
+    print(f"Download directory: {download_dir}")
+
+    # Prompt user for download format
+    download_format = input("Enter download format ('Text' or 'CSV'): ").strip().lower()
+    if download_format not in ["text", "csv"]:
+        print("Invalid format selected. Defaulting to 'Text'.")
+        download_format = "text"
+
+    # Prompt user for filename
+    filename = input("Enter the desired filename (without extension): ").strip()
+
+    try:
+        print("Initializing Chromedriver")
+        driver.get('https://blast.ncbi.nlm.nih.gov/Blast.cgi?PROGRAM=blastp&PAGE_TYPE=BlastSearch&LINK_LOC=blasthome')
+        print("Opened NCBI BLAST page.")
+
+        # Wait for the text area to be present
+        textarea = WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, 'textarea#seq'))
+        )
+        textarea.clear()
+        textarea.send_keys(blast_input)
+        print("Input BLAST query.")
+
+        if species:
+            print(f"Total species to add: {len(species)}")
+            # Click 'Add organism' button for each species beyond the first one
+            for i in range(len(species) - 1):
+                try:
+                    add_button = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.XPATH, '//input[@id="addOrg"]'))
+                    )
+                    add_button.click()
+                    print(f"Clicked 'Add organism' button {i + 1} times.")
+                except Exception as e:
+                    print(f"Error clicking 'Add organism' button: {e}")
+
+            # Add each species to the respective input fields
+
+            species_added = False
+            for i, taxon_id in enumerate(species):
+                print(f"Adding organism with taxon ID {taxon_id}")
+
+                try:
+                    organism_input_id = f'qorganism{i}' if i > 0 else 'qorganism'
+                    print(f"Attempting to add organism with taxon ID {taxon_id} to input field {organism_input_id}")
+                    organism_input = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, f'input#{organism_input_id}'))
+                    )
+                    organism_input.clear()
+                    organism_input.send_keys(taxon_id)
+                    print(f"Typed taxon ID {taxon_id} into input field {organism_input_id}")
+
+                    # Wait for the dropdown to update
+                    print("Waiting for dropdown to update...")
+                    dropdown_option = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.XPATH, f'//li[contains(@valueid, "{taxon_id}")]'))
+                    )
+                    dropdown_option.click()
+                    print(f"Selected dropdown option for taxon ID {taxon_id}")
+
+                    species_added = True
+                except Exception as e:
+                    print(f"Error adding organism with taxon ID {taxon_id}: {e}")
+
+            if not species_added:
+                print("No species were successfully added. Proceeding without species restriction.")
+        else:
+            print("No species provided. Proceeding without species restriction.")
+
+        # Set query subranges
+        for i, seq in enumerate(sequences):
+            if seq["start"] is not None and seq["end"] is not None:
+                try:
+                    query_from = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.NAME, f'QUERY_FROM'))
+                    )
+                    query_to = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.NAME, f'QUERY_TO'))
+                    )
+                    query_from.clear()
+                    query_from.send_keys(str(seq["start"]))
+                    query_to.clear()
+                    query_to.send_keys(str(seq["end"]))
+                    print(f"Set query range for sequence {i + 1}: {seq['start']}-{seq['end']}.")
+                except Exception as e:
+                    print(f"Error setting range for sequence {i + 1}: {e}")
+
+        # Click the BLAST button to submit the query
+        try:
+            blast_button = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, '//input[@value="BLAST"]'))
+            )
+            blast_button.click()
+            print("Clicked the BLAST button.")
+        except Exception as e:
+            print(f"Error clicking the BLAST button: {e}")
+
+        # Wait for the results page to load completely
+        try:
+            WebDriverWait(driver, 180).until(
+                EC.presence_of_element_located((By.ID, 'btnDwnld'))
+            )
+            print("Results page loaded.")
+        except Exception as e:
+            print(f"Error waiting for the results page: {e}")
+
+        # Click the download button
+        try:
+            download_button = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.ID, 'btnDwnld'))
+            )
+            download_button.click()
+            print("Clicked the download button.")
+        except Exception as e:
+            print(f"Error clicking the download button: {e}")
+
+        # Get the download URL for the selected format
+        try:
+            if download_format == "text":
+                format_option = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, 'dwText'))
+                )
+            else:  # CSV
+                format_option = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.ID, 'dwDescrCsv'))
+                )
+
+            download_url = format_option.get_attribute('url')
+            print(f"Download URL for {download_format} format:", download_url)
+        except Exception as e:
+            print(f"Error selecting '{download_format}' format: {e}")
+
+        # Download the file using the URL
+        try:
+            local_filename = os.path.join(download_dir, f"{filename}.{download_format}")
+            download_file(f"https://blast.ncbi.nlm.nih.gov/{download_url}", local_filename)
+            print(f"BLAST results downloaded to {local_filename}")
+
+            # Open the downloaded file
+            with open(local_filename, 'r') as file:
+                print(file.read())
+        except Exception as e:
+            print(f"Error downloading the file: {e}")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        driver.quit()
+
+# Ensure the WebDriver instance is initialized correctly
+print("Reinitializing Chromedriver...")
+
+try:
+    driver = gs.Chrome()  # Reinitialize the WebDriver instance
+    print("Chromedriver reinitialized successfully.")
+except Exception as e:
+    print(f"Failed to initialize Chromedriver: {e}")
+
+# Main execution
+print("Reading and parsing file...")
+sequences, species = read_and_parse_file()
+species_of_interest = input("Enter the species of your protein of interest (e.g., human, mouse, or your model species): ").strip()
+print("Processing sequences...")
+process_sequences(sequences, species_of_interest)
+blast_input = format_blast_input(sequences)
+print("Formatted BLAST Input:")
+print(blast_input)
+
+# Call the function to upload and download BLAST
+upload_and_download_blast(blast_input, sequences, species)
+
+**SAMPLE OUTPUT (TESTING PHASE)**
+
+Reading and parsing file...
+No file chosen Upload widget is only available when the cell has been executed in the current browser session. Please rerun this cell to enable.
+Saving selenium blast template 2.txt to selenium blast template 2 (9).txt
+Parsed line: Neuromedin B [1-121]
+Sequences extracted: [{'protein': 'Neuromedin B', 'start': 1, 'end': 121}]
+Received taxon ID: 9606
+Received taxon ID: 9598
+Received taxon ID: 9597
+Enter the species of your protein of interest (e.g., human, mouse, or your model species): human
+Processing sequences...
+Sequences to analyze:
+Processing sequence: Neuromedin B
+Searching for protein: Neuromedin B in species: human
+Search results: {'Count': '58', 'RetMax': '20', 'RetStart': '0', 'IdList': ['1024249356', '45505145', '45505143', '7669548', '308153451', '281185514', '212286370', '128364', '2689118640', '1024249354', '161484640', '295849290', '7019577', '2670404010', '2462544319', '2462498614', '1034590777', '2559883241', '2447595853', '2227338031'], 'TranslationSet': [{'From': 'Neuromedin B', 'To': 'Neuromedin B[Protein Name] OR (Neuromedin[All Fields] AND B[All Fields])'}, {'From': 'human[Organism]', 'To': '"Homo sapiens"[Organism]'}], 'TranslationStack': [{'Term': 'Neuromedin B[Protein Name]', 'Field': 'Protein Name', 'Count': '295', 'Explode': 'N'}, {'Term': 'Neuromedin[All Fields]', 'Field': 'All Fields', 'Count': '4658', 'Explode': 'N'}, {'Term': 'B[All Fields]', 'Field': 'All Fields', 'Count': '31318511', 'Explode': 'N'}, 'AND', 'GROUP', 'OR', 'GROUP', {'Term': '"Homo sapiens"[Organism]', 'Field': 'Organism', 'Count': '1959971', 'Explode': 'Y'}, 'AND'], 'QueryTranslation': '(Neuromedin B[Protein Name] OR (Neuromedin[All Fields] AND B[All Fields])) AND "Homo sapiens"[Organism]'}
+Fetch results: >NP_001311237.1 neuromedin-B receptor isoform b precursor [Homo sapiens]
+MDMQTSGALLRTCVKAMGIWVVSVLLAVPEAVFSEVARISSLDNSSFTACIPYPQTDELHPKIHSVLIFL
+VYFLIPLAIISIYYYHIAKTLIKSAHNLPGEYNEHTKKQMETRKRLAKIVLVFVGCFIFCWFPNHILYMY
+RSFNYNEIDPSLGHMIVTLVARVLSFGNSCVNPFALYLLSESFRRHFNSQLCCGRKSYQERGTSYLLSSS
+AVRMTSLKSNAKNMVTNSVLLNGHSMKQEMAL
+
+
+Neuromedin B reconfigured to NP_001311237.1 based on Entrez results
+Formatted BLAST Input:
+>NP_001311237.1 neuromedin-B receptor isoform b precursor [Homo sapiens]
+MDMQTSGALLRTCVKAMGIWVVSVLLAVPEAVFSEVARISSLDNSSFTACIPYPQTDELHPKIHSVLIFL
+VYFLIPLAIISIYYYHIAKTLIKSAHNLPGEYNEHTKKQMETRKRLAKIVLVFVGCFIFCWFPNHILYMY
+RSFNYNEIDPSLGHMIVTLVARVLSFGNSCVNPFALYLLSESFRRHFNSQLCCGRKSYQERGTSYLLSSS
+AVRMTSLKSNAKNMVTNSVLLNGHSMKQEMAL
+
+
+
+Download directory: /content
+Enter download format ('Text' or 'CSV'): CSV
+Enter the desired filename (without extension): neuromedin-b_HumanChimpanzeeBonobo
+Initializing Chromedriver
+Opened NCBI BLAST page.
+Input BLAST query.
+Total species to add: 3
+Clicked 'Add organism' button 1 times.
+Clicked 'Add organism' button 2 times.
+Adding organism with taxon ID 9606
+Attempting to add organism with taxon ID 9606 to input field qorganism
+Typed taxon ID 9606 into input field qorganism
+Waiting for dropdown to update...
+Selected dropdown option for taxon ID 9606
+Adding organism with taxon ID 9598
+Attempting to add organism with taxon ID 9598 to input field qorganism1
+Typed taxon ID 9598 into input field qorganism1
+Waiting for dropdown to update...
+Selected dropdown option for taxon ID 9598
+Adding organism with taxon ID 9597
+Attempting to add organism with taxon ID 9597 to input field qorganism2
+Typed taxon ID 9597 into input field qorganism2
+Waiting for dropdown to update...
+Selected dropdown option for taxon ID 9597
+Set query range for sequence 1: 1-121.
+Clicked the BLAST button.
+Results page loaded.
+Clicked the download button.
+Download URL for csv format: Blast.cgi?RESULTS_FILE=on&RID=78S39CGY013&FORMAT_TYPE=CSV&DESCRIPTIONS=100&FORMAT_OBJECT=Alignment&QUERY_INDEX=0&DOWNLOAD_TEMPL=Results&CMD=Get
+BLAST results downloaded to /content/neuromedin-b_HumanChimpanzeeBonobo.csv
+Description,Scientific Name,Common Name,Taxid,Max Score,Total Score,Query Cover,E value,Per. ident,Acc. Len,Accession  
+neuromedin-B receptor isoform b precursor [Homo sapiens],Homo sapiens,human,9606,250,250,100%,8e-85,100.00,242,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_001311236.1?report=genbank&log$=prottop&blast_rank=1&RID=78S39CGY013"",""NP_001311236.1"")"
+neuromedin-B receptor isoform X4 [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,246,246,100%,3e-83,98.35,242,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_034818854.1?report=genbank&log$=prottop&blast_rank=2&RID=78S39CGY013"",""XP_034818854.1"")"
+neuromedin B receptor [Homo sapiens],Homo sapiens,human,9606,251,251,100%,5e-83,100.00,390,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AAA59939.1?report=genbank&log$=prottop&blast_rank=3&RID=78S39CGY013"",""AAA59939.1"")"
+"Chain R, Neuromedin-B receptor [Homo sapiens]",Homo sapiens,human,9606,251,251,100%,5e-83,100.00,390,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/8H0P_R?report=genbank&log$=prottop&blast_rank=4&RID=78S39CGY013"",""8H0P_R"")"
+neuromedin-B receptor isoform a [Homo sapiens],Homo sapiens,human,9606,251,251,100%,5e-83,100.00,390,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_002502.2?report=genbank&log$=prottop&blast_rank=5&RID=78S39CGY013"",""NP_002502.2"")"
+neuromedin-B receptor isoform X1 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,245,245,100%,1e-82,97.52,242,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_016811883.2?report=genbank&log$=prottop&blast_rank=6&RID=78S39CGY013"",""XP_016811883.2"")"
+Neuromedin B receptor [Homo sapiens],Homo sapiens,human,9606,248,248,100%,9e-82,99.17,390,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AAH95542.1?report=genbank&log$=prottop&blast_rank=7&RID=78S39CGY013"",""AAH95542.1"")"
+neuromedin-B receptor isoform X3 [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,245,245,100%,2e-81,98.35,345,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_024784926.4?report=genbank&log$=prottop&blast_rank=8&RID=78S39CGY013"",""XP_024784926.4"")"
+neuromedin-B receptor isoform X2 [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,246,246,100%,2e-81,98.35,360,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_054970137.1?report=genbank&log$=prottop&blast_rank=9&RID=78S39CGY013"",""XP_054970137.1"")"
+neuromedin-B receptor isoform X2 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,244,244,100%,2e-81,97.52,301,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_016811882.2?report=genbank&log$=prottop&blast_rank=10&RID=78S39CGY013"",""XP_016811882.2"")"
+NMBR isoform 1 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,247,247,100%,2e-81,98.35,390,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/PNI86959.1?report=genbank&log$=prottop&blast_rank=11&RID=78S39CGY013"",""PNI86959.1"")"
+neuromedin-B receptor isoform X1 [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,246,246,100%,2e-81,98.35,390,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_003827761.1?report=genbank&log$=prottop&blast_rank=12&RID=78S39CGY013"",""XP_003827761.1"")"
+neuromedin-B receptor isoform X3 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,245,245,100%,7e-81,97.52,390,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_527520.4?report=genbank&log$=prottop&blast_rank=13&RID=78S39CGY013"",""XP_527520.4"")"
+gastrin-releasing peptide receptor isoform X2 [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,150,150,100%,5e-44,59.02,384,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_003805404.1?report=genbank&log$=prottop&blast_rank=14&RID=78S39CGY013"",""XP_003805404.1"")"
+gastrin-releasing peptide receptor isoform X3 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,150,150,100%,5e-44,59.02,384,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_520952.2?report=genbank&log$=prottop&blast_rank=15&RID=78S39CGY013"",""XP_520952.2"")"
+gastrin-releasing peptide receptor [Homo sapiens],Homo sapiens,human,9606,150,150,100%,5e-44,59.02,384,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_005305.1?report=genbank&log$=prottop&blast_rank=16&RID=78S39CGY013"",""NP_005305.1"")"
+"Chain R, Gastrin-releasing peptide receptor [Homo sapiens]",Homo sapiens,human,9606,150,150,100%,5e-44,59.02,384,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/8H0Q_R?report=genbank&log$=prottop&blast_rank=17&RID=78S39CGY013"",""8H0Q_R"")"
+gastrin-releasing peptide receptor isoform X2 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,150,150,100%,6e-44,59.02,392,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_054532338.1?report=genbank&log$=prottop&blast_rank=18&RID=78S39CGY013"",""XP_054532338.1"")"
+gastrin-releasing peptide receptor isoform X1 [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,150,150,100%,2e-43,59.02,443,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_063457969.1?report=genbank&log$=prottop&blast_rank=19&RID=78S39CGY013"",""XP_063457969.1"")"
+gastrin-releasing peptide receptor isoform X1 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,150,150,100%,2e-43,59.02,443,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_016799489.1?report=genbank&log$=prottop&blast_rank=20&RID=78S39CGY013"",""XP_016799489.1"")"
+bombesin receptor subtype-3 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,124,124,100%,9e-34,48.36,399,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_001137541.1?report=genbank&log$=prottop&blast_rank=21&RID=78S39CGY013"",""XP_001137541.1"")"
+bombesin receptor subtype-3 [Homo sapiens],Homo sapiens,human,9606,124,124,100%,1e-33,48.36,399,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_001718.1?report=genbank&log$=prottop&blast_rank=22&RID=78S39CGY013"",""NP_001718.1"")"
+"Chain A, Orexin receptor type 1 [Homo sapiens]",Homo sapiens,human,9606,55.1,55.1,86%,1e-08,29.63,336,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/6TO7_A?report=genbank&log$=prottop&blast_rank=23&RID=78S39CGY013"",""6TO7_A"")"
+"Chain A, Orexin receptor type 1 [Homo sapiens]",Homo sapiens,human,9606,55.1,55.1,86%,1e-08,29.63,336,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/6TOD_A?report=genbank&log$=prottop&blast_rank=24&RID=78S39CGY013"",""6TOD_A"")"
+"Chain R, Hypocretin receptor type 2 [Homo sapiens]",Homo sapiens,human,9606,49.7,49.7,85%,1e-06,28.30,374,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/7L1U_R?report=genbank&log$=prottop&blast_rank=25&RID=78S39CGY013"",""7L1U_R"")"
+"Chain R, Endothelin receptor type B,Endothelin receptor type B,Oplophorus-luciferin 2-monooxygenase catalytic subunit chimera [Homo sapiens]",Homo sapiens,human,9606,48.9,48.9,90%,2e-06,28.07,603,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/8HBD_R?report=genbank&log$=prottop&blast_rank=26&RID=78S39CGY013"",""8HBD_R"")"
+"Chain R, Endothelin type B receptor [Homo sapiens]",Homo sapiens,human,9606,48.9,48.9,90%,2e-06,28.07,609,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/8IY5_R?report=genbank&log$=prottop&blast_rank=27&RID=78S39CGY013"",""8IY5_R"")"
+"hypocretin (orexin) receptor 1, isoform CRA_b [Homo sapiens]",Homo sapiens,human,9606,48.5,48.5,85%,2e-06,27.36,283,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/EAX07601.1?report=genbank&log$=prottop&blast_rank=28&RID=78S39CGY013"",""EAX07601.1"")"
+unnamed protein product [Homo sapiens],Homo sapiens,human,9606,48.5,48.5,90%,3e-06,28.07,442,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/BAF83388.1?report=genbank&log$=prottop&blast_rank=29&RID=78S39CGY013"",""BAF83388.1"")"
+endothelin receptor type B isoform 1 precursor [Homo sapiens],Homo sapiens,human,9606,48.5,48.5,90%,3e-06,28.07,442,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_000106.1?report=genbank&log$=prottop&blast_rank=30&RID=78S39CGY013"",""NP_000106.1"")"
+endothelin receptor type B [Homo sapiens],Homo sapiens,human,9606,48.5,48.5,90%,3e-06,28.07,409,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/KAI2569660.1?report=genbank&log$=prottop&blast_rank=31&RID=78S39CGY013"",""KAI2569660.1"")"
+endothelin receptor type B isoform 1 variant [Homo sapiens],Homo sapiens,human,9606,48.5,48.5,90%,3e-06,28.07,459,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/BAD92435.1?report=genbank&log$=prottop&blast_rank=32&RID=78S39CGY013"",""BAD92435.1"")"
+ETB endothelin receptor [Homo sapiens],Homo sapiens,human,9606,48.5,48.5,90%,3e-06,28.07,442,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AAB19411.1?report=genbank&log$=prottop&blast_rank=33&RID=78S39CGY013"",""AAB19411.1"")"
+"endothelin receptor subtype B, ETB [human, prostate stromal cells, Peptide, 442 aa] [Homo sapiens]",Homo sapiens,human,9606,48.5,48.5,90%,3e-06,28.07,442,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AAB34052.1?report=genbank&log$=prottop&blast_rank=34&RID=78S39CGY013"",""AAB34052.1"")"
+endothelin receptor type B isoform 2 precursor [Homo sapiens],Homo sapiens,human,9606,48.5,48.5,90%,3e-06,28.07,436,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_003982.1?report=genbank&log$=prottop&blast_rank=35&RID=78S39CGY013"",""NP_003982.1"")"
+endothelin receptor type B [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,48.1,48.1,90%,4e-06,28.07,532,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_003825301.1?report=genbank&log$=prottop&blast_rank=36&RID=78S39CGY013"",""XP_003825301.1"")"
+orexin/Hypocretin receptor type 1 isoform X2 [Homo sapiens],Homo sapiens,human,9606,48.1,48.1,85%,4e-06,27.36,389,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_016856596.1?report=genbank&log$=prottop&blast_rank=37&RID=78S39CGY013"",""XP_016856596.1"")"
+endothelin receptor type B [Pan troglodytes],Pan troglodytes,chimpanzee,9598,48.1,48.1,90%,4e-06,28.07,532,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_509693.3?report=genbank&log$=prottop&blast_rank=38&RID=78S39CGY013"",""XP_509693.3"")"
+hypocretin receptor 1 [Homo sapiens],Homo sapiens,human,9606,48.1,48.1,85%,4e-06,27.36,389,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/KAI2516013.1?report=genbank&log$=prottop&blast_rank=39&RID=78S39CGY013"",""KAI2516013.1"")"
+hypocretin receptor 1 [Homo sapiens],Homo sapiens,human,9606,48.1,48.1,85%,4e-06,27.36,425,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/KAI2516014.1?report=genbank&log$=prottop&blast_rank=40&RID=78S39CGY013"",""KAI2516014.1"")"
+orexin receptor-1 [Homo sapiens],Homo sapiens,human,9606,48.1,48.1,85%,4e-06,27.36,425,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AAC39601.1?report=genbank&log$=prottop&blast_rank=41&RID=78S39CGY013"",""AAC39601.1"")"
+orexin/Hypocretin receptor type 1 isoform X1 [Homo sapiens],Homo sapiens,human,9606,48.1,48.1,85%,4e-06,27.36,425,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_054192175.1?report=genbank&log$=prottop&blast_rank=42&RID=78S39CGY013"",""XP_054192175.1"")"
+endothelin receptor type B isoform 3 [Homo sapiens],Homo sapiens,human,9606,48.1,48.1,90%,4e-06,28.07,532,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_001188326.1?report=genbank&log$=prottop&blast_rank=43&RID=78S39CGY013"",""NP_001188326.1"")"
+orexin/Hypocretin receptor type 1 [Homo sapiens],Homo sapiens,human,9606,48.1,48.1,85%,4e-06,27.36,425,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_001516.2?report=genbank&log$=prottop&blast_rank=44&RID=78S39CGY013"",""NP_001516.2"")"
+HCRTR1 isoform 5 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,48.1,48.1,85%,4e-06,27.36,389,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/PNI15637.1?report=genbank&log$=prottop&blast_rank=45&RID=78S39CGY013"",""PNI15637.1"")"
+endothelin receptor B delta 3 [Homo sapiens],Homo sapiens,human,9606,48.1,48.1,90%,4e-06,28.07,531,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AAD24541.1?report=genbank&log$=prottop&blast_rank=46&RID=78S39CGY013"",""AAD24541.1"")"
+orexin/Hypocretin receptor type 1 [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,48.1,48.1,85%,4e-06,27.36,425,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_054959326.2?report=genbank&log$=prottop&blast_rank=47&RID=78S39CGY013"",""XP_054959326.2"")"
+"Chain A, Orexin receptor type 2 [Homo sapiens]",Homo sapiens,human,9606,47.0,47.0,85%,9e-06,26.42,341,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/7XRR_A?report=genbank&log$=prottop&blast_rank=48&RID=78S39CGY013"",""7XRR_A"")"
+prokineticin receptor 2 [Homo sapiens],Homo sapiens,human,9606,46.6,46.6,100%,1e-05,26.83,811,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/EAX10422.1?report=genbank&log$=prottop&blast_rank=49&RID=78S39CGY013"",""EAX10422.1"")"
+endothelin receptor type B [Homo sapiens],Homo sapiens,human,9606,45.1,45.1,80%,3e-05,27.72,162,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/KAI2569661.1?report=genbank&log$=prottop&blast_rank=50&RID=78S39CGY013"",""KAI2569661.1"")"
+PROKR2 isoform 1 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,45.4,45.4,100%,4e-05,26.83,384,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/PNI62500.1?report=genbank&log$=prottop&blast_rank=51&RID=78S39CGY013"",""PNI62500.1"")"
+prokineticin receptor 2 [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,45.4,45.4,100%,4e-05,26.83,384,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_024782673.1?report=genbank&log$=prottop&blast_rank=52&RID=78S39CGY013"",""XP_024782673.1"")"
+unnamed protein product [Homo sapiens],Homo sapiens,human,9606,45.4,45.4,100%,4e-05,26.83,384,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/BAF82684.1?report=genbank&log$=prottop&blast_rank=53&RID=78S39CGY013"",""BAF82684.1"")"
+prokineticin receptor 2 [Homo sapiens],Homo sapiens,human,9606,45.4,45.4,100%,4e-05,26.83,384,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_658986.1?report=genbank&log$=prottop&blast_rank=54&RID=78S39CGY013"",""NP_658986.1"")"
+prokineticin receptor 2 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,45.4,45.4,100%,4e-05,26.83,384,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_001165973.3?report=genbank&log$=prottop&blast_rank=55&RID=78S39CGY013"",""XP_001165973.3"")"
+prokineticin receptor 2 [Homo sapiens],Homo sapiens,human,9606,45.4,45.4,100%,4e-05,26.83,384,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/ABQ52418.1?report=genbank&log$=prottop&blast_rank=56&RID=78S39CGY013"",""ABQ52418.1"")"
+prokineticin receptor 1 isoform X2 [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,44.7,44.7,90%,6e-05,24.56,372,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_063450972.1?report=genbank&log$=prottop&blast_rank=57&RID=78S39CGY013"",""XP_063450972.1"")"
+"Chain A, Orexin receptor type 1 [Homo sapiens]",Homo sapiens,human,9606,44.7,44.7,61%,6e-05,30.77,368,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/6TP3_A?report=genbank&log$=prottop&blast_rank=58&RID=78S39CGY013"",""6TP3_A"")"
+prokineticin receptor 1 isoform X1 [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,44.7,44.7,90%,6e-05,24.56,393,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_003830967.1?report=genbank&log$=prottop&blast_rank=59&RID=78S39CGY013"",""XP_003830967.1"")"
+prokineticin receptor 1 [Homo sapiens],Homo sapiens,human,9606,44.7,44.7,90%,6e-05,24.56,393,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_620414.1?report=genbank&log$=prottop&blast_rank=60&RID=78S39CGY013"",""NP_620414.1"")"
+prokineticin receptor 1 [Homo sapiens],Homo sapiens,human,9606,43.1,43.1,90%,2e-04,23.68,393,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AAM48127.1?report=genbank&log$=prottop&blast_rank=61&RID=78S39CGY013"",""AAM48127.1"")"
+"Chain R, Hypocretin receptor type 2 [Homo sapiens]",Homo sapiens,human,9606,42.7,42.7,67%,3e-04,29.41,407,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/7SR8_R?report=genbank&log$=prottop&blast_rank=62&RID=78S39CGY013"",""7SR8_R"")"
+"Chain R, Orexin receptor type 2 [Homo sapiens]",Homo sapiens,human,9606,42.7,42.7,67%,3e-04,29.41,444,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/7SQO_R?report=genbank&log$=prottop&blast_rank=63&RID=78S39CGY013"",""7SQO_R"")"
+orexin receptor type 2 [Homo sapiens],Homo sapiens,human,9606,42.7,42.7,67%,3e-04,29.41,444,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_001371201.1?report=genbank&log$=prottop&blast_rank=64&RID=78S39CGY013"",""NP_001371201.1"")"
+orexin receptor type 2 [Pan troglodytes],Pan troglodytes,chimpanzee,9598,42.7,42.7,67%,3e-04,29.41,444,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_024212765.1?report=genbank&log$=prottop&blast_rank=65&RID=78S39CGY013"",""XP_024212765.1"")"
+tachykinin receptor 2 [Homo sapiens],Homo sapiens,human,9606,42.7,42.7,85%,3e-04,28.04,362,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/KAI2556038.1?report=genbank&log$=prottop&blast_rank=66&RID=78S39CGY013"",""KAI2556038.1"")"
+orexin receptor type 2 isoform X1 [Homo sapiens],Homo sapiens,human,9606,42.7,42.7,67%,3e-04,29.41,461,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_016866287.1?report=genbank&log$=prottop&blast_rank=67&RID=78S39CGY013"",""XP_016866287.1"")"
+"Chain A, Orexin receptor type 2,GlgA glycogen synthase,Orexin receptor type 2 [Homo sapiens]",Homo sapiens,human,9606,42.4,42.4,80%,4e-04,28.16,560,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/5WQC_A?report=genbank&log$=prottop&blast_rank=68&RID=78S39CGY013"",""5WQC_A"")"
+orexin type-2 receptor isoform 2 [Homo sapiens],Homo sapiens,human,9606,40.4,40.4,60%,0.002,30.26,285,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AGP04117.1?report=genbank&log$=prottop&blast_rank=69&RID=78S39CGY013"",""AGP04117.1"")"
+"Chain A, Endothelin Receptor Subtype-B [Homo sapiens]",Homo sapiens,human,9606,40.0,40.0,60%,0.003,32.47,498,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/5GLH_A?report=genbank&log$=prottop&blast_rank=70&RID=78S39CGY013"",""5GLH_A"")"
+"Chain A, Endothelin Receptor Subtype-B [Homo sapiens]",Homo sapiens,human,9606,39.7,39.7,60%,0.003,32.47,464,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/5GLI_A?report=genbank&log$=prottop&blast_rank=71&RID=78S39CGY013"",""5GLI_A"")"
+"Chain A, Endothelin B receptor,Endolysin,Endothelin B receptor [Homo sapiens]",Homo sapiens,human,9606,39.7,39.7,60%,0.003,32.47,464,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/5XPR_A?report=genbank&log$=prottop&blast_rank=72&RID=78S39CGY013"",""5XPR_A"")"
+endothelin ET-A receptor [Homo sapiens],Homo sapiens,human,9606,37.0,37.0,98%,0.033,24.03,427,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AAB25530.2?report=genbank&log$=prottop&blast_rank=73&RID=78S39CGY013"",""AAB25530.2"")"
+Endothelin receptor type A [Homo sapiens],Homo sapiens,human,9606,36.6,36.6,98%,0.036,24.59,427,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AAH22511.1?report=genbank&log$=prottop&blast_rank=74&RID=78S39CGY013"",""AAH22511.1"")"
+endothelin-1 receptor [Pan paniscus],Pan paniscus,pygmy chimpanzee,9597,36.6,36.6,98%,0.037,24.59,427,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/XP_034815113.1?report=genbank&log$=prottop&blast_rank=75&RID=78S39CGY013"",""XP_034815113.1"")"
+endothelin-1 receptor isoform a precursor [Homo sapiens],Homo sapiens,human,9606,36.6,36.6,98%,0.038,24.03,427,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/NP_001948.1?report=genbank&log$=prottop&blast_rank=76&RID=78S39CGY013"",""NP_001948.1"")"
+endothelin receptor type A [Homo sapiens],Homo sapiens,human,9606,36.6,36.6,98%,0.038,24.59,427,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AAA58447.1?report=genbank&log$=prottop&blast_rank=77&RID=78S39CGY013"",""AAA58447.1"")"
+endothelin receptor subtype A [Homo sapiens],Homo sapiens,human,9606,36.6,36.6,98%,0.038,24.59,427,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/AAB23644.1?report=genbank&log$=prottop&blast_rank=78&RID=78S39CGY013"",""AAB23644.1"")"
+"Chain R, Endothelin-1 receptor,Oplophorus-luciferin 2-monooxygenase catalytic subunit chimera [Homo sapiens]",Homo sapiens,human,9606,36.6,36.6,98%,0.048,24.59,622,"=HYPERLINK(""https://www.ncbi.nlm.nih.gov/protein/8HCQ_R?report=genbank&log$=prottop&blast_rank=79&RID=78S39CGY013"",""8HCQ_R"")"
+
+
+
+
